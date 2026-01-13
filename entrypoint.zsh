@@ -281,10 +281,12 @@ validate_filename_format() {
 # Handle forced config regeneration
 handle_force_regeneration() {
     if [[ "${FORCE_CONFIG_REGENERATION:-false}" == "true" ]]; then
-        log_orange "FORCE_CONFIG_REGENERATION is enabled - removing all existing configs"
-        rm -rf /configs/*
-        rm -rf /keys/*
-        log_green "Existing configs and keys removed"
+        log_orange "FORCE_CONFIG_REGENERATION is enabled - removing all existing data"
+        # (D) includes dotfiles, (N) prevents error if no matches
+        rm -rf /configs/*(DN)
+        rm -rf /keys/*(DN)
+        rm -rf /regen_requests/*(DN)
+        log_green "Removed: client configs, server keys, cached pubkeys, pending regen requests"
     fi
 }
 
