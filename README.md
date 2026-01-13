@@ -2,7 +2,29 @@
 
 Auto-provisioning WireGuard VPN server in Docker. Generates thousands of client configurations automatically on startup.
 
-## Quick Start
+## Automatic Setup (Recommended)
+
+Run this one-liner on a fresh Ubuntu 24 LTS server to install everything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/taofu-labs/wireguard-firehose/main/setup.sh | sudo bash
+```
+
+This will:
+- Install Docker and WireGuard
+- Configure kernel parameters and firewall
+- Download the docker-compose.yml to `~/wireguard-firehose`
+- Create a default `.env` configuration file
+- Pull the Docker image
+
+After setup, start the server:
+
+```bash
+cd ~/wireguard-firehose
+docker compose up -d
+```
+
+## Manual Setup
 
 1. Clone this repository
 2. Copy `.env.example` to `.env` and configure as needed
