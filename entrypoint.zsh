@@ -565,12 +565,16 @@ generate_server_config() {
     # Create /etc/wireguard directory if it doesn't exist
     mkdir -p /etc/wireguard
 
+    # Count total configs first for progress reporting
+    local config_files=( /configs/*.conf(N) )
+    local total_configs=${#config_files[@]}
+
     # Build peer sections for all client configs
     local peer_sections=""
     local client_count=0
+    local last_logged_percent=0
 
-    # Use (N) glob qualifier to handle no matches gracefully
-    for config_file in /configs/*.conf(N); do
+    for config_file in "${config_files[@]}"; do
         [[ -f "$config_file" ]] || continue
 
         local filename=$( basename "$config_file" .conf )
@@ -609,9 +613,14 @@ AllowedIPs = ${client_ip}/32
 "
         (( ++client_count ))
 
-        # Progress logging for large config sets
-        if [[ $(( client_count % 5000 )) -eq 0 ]]; then
-            log_grey "  Processed $client_count client configs..."
+        # Progress logging every 10%
+        if [[ "$total_configs" -gt 0 ]]; then
+            local current_percent=$(( client_count * 100 / total_configs ))
+            if [[ $(( current_percent / 10 )) -gt $(( last_logged_percent / 10 )) ]]; then
+                local display_percent=$(( (current_percent / 10) * 10 ))
+                log_grey "Progress ${display_percent}% ($client_count/$total_configs)"
+                last_logged_percent="$current_percent"
+            fi
         fi
     done
 
@@ -662,6 +671,7 @@ generate_missing_configs() {
     init_ip_iterator "$cidr"
 
     local generated=0
+    local last_logged_percent=0
 
     while [[ "$generated" -lt "$to_generate" ]]; do
         # Get next available IP (O(1) amortized with iterator)
@@ -676,15 +686,11 @@ generate_missing_configs() {
         fi
 
         # Generate keypair for this client
-        local keypair
-        keypair=$( generate_keypair ) || {
-            log_red "Failed to generate keypair at config $generated (possible memory exhaustion)"
-            exit 1
-        }
+        local keypair=$( generate_keypair )
         local client_private_key="${keypair%:*}"
         local client_public_key="${keypair#*:}"
 
-        # Generate the config file (now includes public key for caching)
+        # Generate the config file
         generate_client_config \
             "$client_ip" \
             "$client_private_key" \
@@ -693,19 +699,19 @@ generate_missing_configs() {
             "$server_endpoint" \
             "$DNS_SERVERS" \
             "$ALLOWEDIPS" \
-            "$filename_format" || {
-            log_red "Failed to write config file for $client_ip (possible disk full or permission issue)"
-            exit 1
-        }
+            "$filename_format"
 
         # Mark IP as used
         mark_ip_used "$client_ip"
 
         (( ++generated ))
 
-        # Progress logging every 1000 configs
-        if [[ $(( generated % 1000 )) -eq 0 ]]; then
-            log_grey "  Generated $generated / $to_generate configurations..."
+        # Progress logging every 10%
+        local current_percent=$(( generated * 100 / to_generate ))
+        if [[ $(( current_percent / 10 )) -gt $(( last_logged_percent / 10 )) ]]; then
+            local display_percent=$(( (current_percent / 10) * 10 ))
+            log_grey "Progress ${display_percent}% ($generated/$to_generate)"
+            last_logged_percent="$current_percent"
         fi
     done
 
