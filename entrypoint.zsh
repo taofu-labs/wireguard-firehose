@@ -10,6 +10,9 @@
 # Exit on error, undefined variables, and pipe failures
 set -euo pipefail
 
+# Global error handler to log failures before exit
+trap 'print "\033[0;31m[ERROR] Script failed at line $LINENO with exit code $?\033[0m" >&2; exit 1' ERR
+
 # ------------------------------------------------------------
 # Section 1: Color Logging Helpers
 # ------------------------------------------------------------
@@ -108,24 +111,30 @@ get_default_interface() {
 
 
 # ------------------------------------------------------------
-# Section 3: System Configuration
+# Section 3: System Configuration Verification
 # ------------------------------------------------------------
-# Configure kernel parameters required for WireGuard routing.
+# Verify kernel parameters required for WireGuard routing are set.
+# These should be configured via docker-compose sysctls.
 
-set_sysctl_values() {
-    log_grey "Setting required sysctl values..."
+verify_sysctl_values() {
+    log_grey "Verifying required sysctl values..."
 
-    # Enable IP forwarding for routing traffic between clients and internet
-    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1 || {
-        log_orange "Could not set net.ipv4.ip_forward (may already be set via docker-compose)"
-    }
+    local ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)
+    local src_valid_mark=$(sysctl -n net.ipv4.conf.all.src_valid_mark 2>/dev/null)
 
-    # Enable source validation marking (required for WireGuard routing)
-    sysctl -w net.ipv4.conf.all.src_valid_mark=1 > /dev/null 2>&1 || {
-        log_orange "Could not set net.ipv4.conf.all.src_valid_mark (may already be set via docker-compose)"
-    }
+    if [[ "$ip_forward" != "1" ]]; then
+        log_red "net.ipv4.ip_forward is not enabled"
+        log_orange "Ensure docker-compose.yml includes: sysctls: - net.ipv4.ip_forward=1"
+        exit 1
+    fi
 
-    log_green "Sysctl values configured"
+    if [[ "$src_valid_mark" != "1" ]]; then
+        log_red "net.ipv4.conf.all.src_valid_mark is not enabled"
+        log_orange "Ensure docker-compose.yml includes: sysctls: - net.ipv4.conf.all.src_valid_mark=1"
+        exit 1
+    fi
+
+    log_green "Sysctl values verified"
 }
 
 
@@ -582,7 +591,10 @@ generate_missing_configs() {
 
     while [[ "$generated" -lt "$to_generate" ]]; do
         # Get next available IP (O(1) amortized with iterator)
-        local client_ip=$( get_next_available_ip )
+        local client_ip=$( get_next_available_ip ) || {
+            log_red "Failed to get next available IP at config $generated"
+            exit 1
+        }
 
         if [[ -z "$client_ip" ]]; then
             log_orange "No more IPs available in subnet"
@@ -590,7 +602,11 @@ generate_missing_configs() {
         fi
 
         # Generate keypair for this client
-        local keypair=$( generate_keypair )
+        local keypair
+        keypair=$( generate_keypair ) || {
+            log_red "Failed to generate keypair at config $generated (possible memory exhaustion)"
+            exit 1
+        }
         local client_private_key="${keypair%:*}"
         local client_public_key="${keypair#*:}"
 
@@ -602,7 +618,10 @@ generate_missing_configs() {
             "$SERVER_PUBLIC_KEY" \
             "$server_endpoint" \
             "$DNS_SERVERS" \
-            "$ALLOWEDIPS"
+            "$ALLOWEDIPS" || {
+            log_red "Failed to write config file for $client_ip (possible disk full or permission issue)"
+            exit 1
+        }
 
         # Mark IP as used
         mark_ip_used "$client_ip"
@@ -691,8 +710,8 @@ main() {
     check_dependencies
     check_capabilities
 
-    # Step 2: Set system configuration
-    set_sysctl_values
+    # Step 2: Verify system configuration (set via docker-compose sysctls)
+    verify_sysctl_values
 
     # Step 3: Validate all configuration
     validate_cidr "$INTERNAL_SUBNET_CIDR"
