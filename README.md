@@ -83,6 +83,13 @@ sudo ufw allow 51820/udp
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8,8.8.4.4` | DNS servers for clients |
 | `FILENAME_FORMAT` | `ip` | Config naming: `ip` (10.0.0.2.conf) or `increment` (peer1.conf) |
 | `FORCE_CONFIG_REGENERATION` | `false` | Set to `true` to delete all configs and regenerate on startup |
+| `ISOLATE_CLIENTS` | `true` | Prevent clients from communicating with each other |
+
+### Client Isolation
+
+By default, `ISOLATE_CLIENTS=true` prevents VPN clients from communicating with each other. Each client can only reach the internet through the VPN tunnel.
+
+Set `ISOLATE_CLIENTS=false` to allow client-to-client communication (e.g., for LAN gaming, file sharing between clients).
 
 ## Client Configuration Files
 

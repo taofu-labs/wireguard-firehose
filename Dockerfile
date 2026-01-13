@@ -40,7 +40,8 @@ ENV WIREGUARD_PORT=51820 \
     ALLOWEDIPS=0.0.0.0/0 \
     DNS_SERVERS=1.1.1.1,8.8.8.8,8.8.4.4 \
     FILENAME_FORMAT=ip \
-    FORCE_CONFIG_REGENERATION=false
+    FORCE_CONFIG_REGENERATION=false \
+    ISOLATE_CLIENTS=true
 
 # Health check: verify WireGuard is listening on the configured port
 # Uses nc to check UDP port as specified in the specification

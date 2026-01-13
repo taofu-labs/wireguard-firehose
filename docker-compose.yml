@@ -13,7 +13,10 @@ services:
     # Required capabilities for WireGuard networking
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+
+    # Security hardening: prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
 
     # Required kernel parameters for VPN routing
     sysctls:
@@ -33,6 +36,7 @@ services:
       - DNS_SERVERS=${DNS_SERVERS:-1.1.1.1,8.8.8.8,8.8.4.4}
       - FILENAME_FORMAT=${FILENAME_FORMAT:-ip}
       - FORCE_CONFIG_REGENERATION=${FORCE_CONFIG_REGENERATION:-false}
+      - ISOLATE_CLIENTS=${ISOLATE_CLIENTS:-true}
 
     # Persistent volumes for configs, keys, and regen requests
     volumes:

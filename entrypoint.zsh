@@ -101,10 +101,16 @@ get_default_interface() {
     # Try to get the default route interface
     default_if=$( ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' )
 
-    if [[ -n "$default_if" ]] && ip link show "$default_if" &>/dev/null; then
+    # Security: Validate interface name format to prevent injection
+    # Interface names should only contain alphanumeric, underscore, hyphen
+    if [[ -n "$default_if" && "$default_if" =~ ^[a-zA-Z0-9_-]+$ ]] && ip link show "$default_if" &>/dev/null; then
         echo "$default_if"
     else
-        log_orange "Could not detect default interface, falling back to eth0"
+        if [[ -n "$default_if" && ! "$default_if" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            log_orange "Invalid interface name detected, falling back to eth0"
+        else
+            log_orange "Could not detect default interface, falling back to eth0"
+        fi
         echo "eth0"
     fi
 }
@@ -276,6 +282,21 @@ validate_filename_format() {
     fi
 
     log_green "FILENAME_FORMAT validated: $format"
+}
+
+# Validate ISOLATE_CLIENTS (true or false)
+validate_isolate_clients() {
+    local value="$1"
+
+    log_grey "Validating ISOLATE_CLIENTS: $value"
+
+    if [[ "$value" != "true" && "$value" != "false" ]]; then
+        log_red "Invalid ISOLATE_CLIENTS: $value"
+        log_orange "Valid values are: true, false"
+        exit 1
+    fi
+
+    log_green "ISOLATE_CLIENTS validated: $value"
 }
 
 # Handle forced config regeneration
@@ -553,6 +574,7 @@ EOF
 
     # Cache the public key for faster server config regeneration (always keyed by IP)
     echo "$client_public_key" > "$pubkey_file"
+    chmod 644 "$pubkey_file"
 }
 
 # Generate the server configuration with all client peers
@@ -561,8 +583,9 @@ generate_server_config() {
     local server_ip="$1"
     local cidr="$2"
     local default_interface="$3"
+    local isolate_clients="$4"
 
-    log_grey "Generating server configuration..."
+    log_grey "Generating server configuration (client isolation: $isolate_clients)..."
 
     # Create /etc/wireguard directory if it doesn't exist
     mkdir -p /etc/wireguard
@@ -608,6 +631,7 @@ generate_server_config() {
                 }
                 # Cache it for next time
                 echo "$client_public_key" > "$pubkey_file"
+                chmod 644 "$pubkey_file"
             else
                 log_orange "Skipping $client_ip: invalid private key in config"
                 continue
@@ -623,6 +647,20 @@ AllowedIPs = ${client_ip}/32
         (( ++client_count ))
     done
 
+    # Build iptables rules based on client isolation setting
+    local post_up=""
+    local post_down=""
+
+    if [[ "$isolate_clients" == "true" ]]; then
+        # Isolated: clients can only reach internet, not each other
+        post_up="iptables -A FORWARD -i %i -o ${default_interface} -j ACCEPT; iptables -A FORWARD -i ${default_interface} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${default_interface} -j MASQUERADE"
+        post_down="iptables -D FORWARD -i %i -o ${default_interface} -j ACCEPT; iptables -D FORWARD -i ${default_interface} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${default_interface} -j MASQUERADE"
+    else
+        # Not isolated: clients can communicate with each other
+        post_up="iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${default_interface} -j MASQUERADE"
+        post_down="iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${default_interface} -j MASQUERADE"
+    fi
+
     # Write server config with NAT rules for routing client traffic
     cat > /etc/wireguard/wg0.conf << EOF
 [Interface]
@@ -631,9 +669,9 @@ PrivateKey = ${SERVER_PRIVATE_KEY}
 Address = ${server_ip}/${cidr#*/}
 ListenPort = ${WIREGUARD_PORT}
 
-# NAT rules: masquerade client traffic through the detected interface (${default_interface})
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${default_interface} -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${default_interface} -j MASQUERADE
+# NAT rules (client isolation: ${isolate_clients})
+PostUp = ${post_up}
+PostDown = ${post_down}
 ${peer_sections}
 EOF
 
@@ -784,6 +822,13 @@ regenerate_client_keys() {
     local client_ip=""
     local config_file=""
 
+    # Security: Validate identifier format strictly to prevent path traversal
+    # Only allow: IP addresses (10.0.0.5) or peer names (peer5)
+    if [[ ! "$identifier" =~ ^(peer[0-9]+|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})$ ]]; then
+        log_red "Invalid identifier format: $identifier (must be IP or peerN)"
+        return 1
+    fi
+
     # Determine if identifier is an IP or peer name
     if [[ "$identifier" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         client_ip="$identifier"
@@ -840,11 +885,17 @@ regenerate_client_keys() {
     local new_private_key="${keypair%:*}"
     local new_public_key="${keypair#*:}"
 
-    # Update config file with new private key
-    sed -i "s|^PrivateKey = .*|PrivateKey = ${new_private_key}|" "$config_file"
+    # Update config file with new private key (atomic write via temp file + rename)
+    local temp_config="${config_file}.tmp.$$"
+    sed "s|^PrivateKey = .*|PrivateKey = ${new_private_key}|" "$config_file" > "$temp_config"
+    chmod 600 "$temp_config"
+    mv "$temp_config" "$config_file"
 
-    # Update cached public key
-    echo "$new_public_key" > "$pubkey_file"
+    # Update cached public key (atomic write)
+    local temp_pubkey="${pubkey_file}.tmp.$$"
+    echo "$new_public_key" > "$temp_pubkey"
+    chmod 644 "$temp_pubkey"
+    mv "$temp_pubkey" "$pubkey_file"
 
     # Hot-swap peer in WireGuard interface
     if [[ -n "$old_pubkey" ]]; then
@@ -930,6 +981,7 @@ main() {
     validate_dns_servers "$DNS_SERVERS"
     validate_allowed_ips "$ALLOWEDIPS"
     validate_filename_format "$FILENAME_FORMAT"
+    validate_isolate_clients "$ISOLATE_CLIENTS"
 
     # Step 4: Handle forced regeneration (before anything else touches configs)
     handle_force_regeneration
@@ -957,7 +1009,7 @@ main() {
     generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip" "$FILENAME_FORMAT"
 
     # Step 11: Generate server config with all client peers
-    generate_server_config "$server_ip" "$INTERNAL_SUBNET_CIDR" "$default_interface"
+    generate_server_config "$server_ip" "$INTERNAL_SUBNET_CIDR" "$default_interface" "$ISOLATE_CLIENTS"
 
     # Step 12: Start WireGuard server
     start_wireguard

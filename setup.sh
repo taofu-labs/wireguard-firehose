@@ -171,6 +171,8 @@ INTERNAL_SUBNET_CIDR=10.0.0.0/16
 MAX_CONFIGS=50000
 ALLOWEDIPS=0.0.0.0/0
 DNS_SERVERS=1.1.1.1,8.8.8.8,8.8.4.4
+FILENAME_FORMAT=ip
+ISOLATE_CLIENTS=true
 EOF
     else
         log_info "Preserving existing .env file"
