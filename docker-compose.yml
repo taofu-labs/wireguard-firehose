@@ -1,0 +1,40 @@
+# ============================================================
+# WireGuard Firehose - Docker Compose Configuration
+# ============================================================
+# Container orchestration with required capabilities and defaults
+# ============================================================
+
+services:
+  wireguard:
+    build: .
+    image: taofuprotocol/wireguard-firehose:latest
+    container_name: wireguard-firehose
+
+    # Required capabilities for WireGuard networking
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+
+    # Required kernel parameters for VPN routing
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+
+    # Environment variables with defaults
+    environment:
+      - WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+      - INTERNAL_SUBNET_CIDR=${INTERNAL_SUBNET_CIDR:-10.0.0.0/16}
+      - MAX_CONFIGS=${MAX_CONFIGS:-50000}
+      - ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0}
+      - DNS_SERVERS=${DNS_SERVERS:-1.1.1.1,8.8.8.8,8.8.4.4}
+
+    # Persistent volume for client configurations
+    volumes:
+      - ./configs:/configs
+
+    # WireGuard UDP port mapping
+    ports:
+      - "${WIREGUARD_PORT:-51820}:${WIREGUARD_PORT:-51820}/udp"
+
+    # Restart policy for production reliability
+    restart: unless-stopped

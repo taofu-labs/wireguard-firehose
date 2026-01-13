@@ -1,0 +1,736 @@
+#!/usr/bin/env zsh
+
+# ============================================================
+# WireGuard Firehose - Auto-provisioning WireGuard Server
+# ============================================================
+# This entrypoint script automatically provisions a WireGuard
+# server with client configurations on container startup.
+# ============================================================
+
+# Exit on error, undefined variables, and pipe failures
+set -euo pipefail
+
+# ------------------------------------------------------------
+# Section 1: Color Logging Helpers
+# ------------------------------------------------------------
+# Terminal colors for visual feedback on container operations.
+# Grey: informational, Green: success, Red: error, Orange: warning
+
+readonly COLOR_GREY=$'\033[0;90m'
+readonly COLOR_GREEN=$'\033[0;32m'
+readonly COLOR_RED=$'\033[0;31m'
+readonly COLOR_ORANGE=$'\033[0;33m'
+readonly COLOR_RESET=$'\033[0m'
+
+# Log informational message (grey) - nice to know, can be ignored
+log_grey() {
+    print "${COLOR_GREY}[INFO] $1${COLOR_RESET}"
+}
+
+# Log success message (green) - explicit success
+log_green() {
+    print "${COLOR_GREEN}[SUCCESS] $1${COLOR_RESET}"
+}
+
+# Log error message (red) - explicit failure (to stderr)
+log_red() {
+    print "${COLOR_RED}[ERROR] $1${COLOR_RESET}" >&2
+}
+
+# Log warning/suggestion message (orange)
+log_orange() {
+    print "${COLOR_ORANGE}[WARNING] $1${COLOR_RESET}"
+}
+
+
+# ------------------------------------------------------------
+# Section 2: Dependency and Capability Checks
+# ------------------------------------------------------------
+# Verify all required tools and container permissions are available
+# before attempting any WireGuard operations.
+
+check_dependencies() {
+    log_grey "Checking required dependencies..."
+
+    local dependencies=( "wg" "wg-quick" "ip" "iptables" "curl" "nc" )
+    local missing=()
+
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing+=( "$dep" )
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        log_red "Missing dependencies: ${missing[*]}"
+        exit 1
+    fi
+
+    log_green "All dependencies available"
+}
+
+check_capabilities() {
+    log_grey "Checking container capabilities..."
+
+    # Check if we can create a network interface (requires NET_ADMIN)
+    if ! ip link add dummy0 type dummy 2>/dev/null; then
+        log_red "Missing NET_ADMIN capability - cannot create network interfaces"
+        log_orange "Run container with: --cap-add=NET_ADMIN"
+        exit 1
+    fi
+    ip link delete dummy0 2>/dev/null
+
+    # Check if /dev/net/tun exists (required for WireGuard)
+    if [[ ! -c /dev/net/tun ]]; then
+        log_red "TUN device not available at /dev/net/tun"
+        log_orange "Ensure the container has access to /dev/net/tun"
+        exit 1
+    fi
+
+    log_green "Container capabilities verified"
+}
+
+# Get the default network interface (for NAT rules)
+# Falls back to eth0 if detection fails
+get_default_interface() {
+    local default_if=""
+
+    # Try to get the default route interface
+    default_if=$( ip route show default 2>/dev/null | awk '/default/ {print $5; exit}' )
+
+    if [[ -n "$default_if" ]] && ip link show "$default_if" &>/dev/null; then
+        echo "$default_if"
+    else
+        log_orange "Could not detect default interface, falling back to eth0"
+        echo "eth0"
+    fi
+}
+
+
+# ------------------------------------------------------------
+# Section 3: System Configuration
+# ------------------------------------------------------------
+# Configure kernel parameters required for WireGuard routing.
+
+set_sysctl_values() {
+    log_grey "Setting required sysctl values..."
+
+    # Enable IP forwarding for routing traffic between clients and internet
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1 || {
+        log_orange "Could not set net.ipv4.ip_forward (may already be set via docker-compose)"
+    }
+
+    # Enable source validation marking (required for WireGuard routing)
+    sysctl -w net.ipv4.conf.all.src_valid_mark=1 > /dev/null 2>&1 || {
+        log_orange "Could not set net.ipv4.conf.all.src_valid_mark (may already be set via docker-compose)"
+    }
+
+    log_green "Sysctl values configured"
+}
+
+
+# ------------------------------------------------------------
+# Section 4: Validation Functions
+# ------------------------------------------------------------
+# Validate user-provided configuration values to ensure the
+# container can operate correctly.
+
+# Validate CIDR notation format and values
+validate_cidr() {
+    local cidr="$1"
+
+    log_grey "Validating CIDR: $cidr"
+
+    # Regex pattern for valid CIDR notation
+    local cidr_pattern='^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$'
+
+    if [[ ! "$cidr" =~ $cidr_pattern ]]; then
+        log_red "Invalid CIDR format: $cidr"
+        log_orange "Expected format: x.x.x.x/y (e.g., 10.0.0.0/16)"
+        exit 1
+    fi
+
+    # Validate each octet is 0-255
+    local ip_part="${cidr%/*}"
+    local octets=( ${(s:.:)ip_part} )
+
+    for octet in "${octets[@]}"; do
+        if [[ "$octet" -lt 0 || "$octet" -gt 255 ]]; then
+            log_red "Invalid IP octet in CIDR: $octet"
+            exit 1
+        fi
+    done
+
+    log_green "CIDR format validated: $cidr"
+}
+
+# Calculate available IP addresses from CIDR
+# Returns the number of usable client IPs (excluding network, broadcast, and server)
+calculate_available_ips() {
+    local cidr="$1"
+    local prefix="${cidr#*/}"
+
+    # Calculate total IPs: 2^(32 - prefix)
+    # Subtract 2 for network and broadcast, subtract 1 for server (.1)
+    local total_ips=$(( (2 ** (32 - prefix)) - 3 ))
+
+    echo "$total_ips"
+}
+
+# Validate MAX_CONFIGS against available IPs in the subnet
+validate_max_configs() {
+    local max_configs="$1"
+    local cidr="$2"
+
+    # Check if MAX_CONFIGS is a positive integer
+    if [[ ! "$max_configs" =~ ^[0-9]+$ ]] || [[ "$max_configs" -lt 1 ]]; then
+        log_red "MAX_CONFIGS must be a positive integer: $max_configs"
+        exit 1
+    fi
+
+    local available_ips=$( calculate_available_ips "$cidr" )
+
+    if [[ "$max_configs" -gt "$available_ips" ]]; then
+        log_red "MAX_CONFIGS ($max_configs) exceeds available IPs ($available_ips) for subnet $cidr"
+        log_orange "Either increase subnet size or decrease MAX_CONFIGS"
+        exit 1
+    fi
+
+    log_green "MAX_CONFIGS validated: $max_configs configs possible in $cidr (max: $available_ips)"
+}
+
+# Validate DNS_SERVERS format (comma-separated IPs)
+validate_dns_servers() {
+    local dns_servers="$1"
+
+    log_grey "Validating DNS_SERVERS: $dns_servers"
+
+    if [[ -z "$dns_servers" ]]; then
+        log_red "DNS_SERVERS cannot be empty"
+        exit 1
+    fi
+
+    # Split by comma and validate each IP
+    local ips=( ${(s:,:)dns_servers} )
+
+    for ip in "${ips[@]}"; do
+        # Trim whitespace
+        ip="${ip// /}"
+        if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            log_red "Invalid DNS server IP: $ip"
+            log_orange "Expected format: x.x.x.x (e.g., 1.1.1.1)"
+            exit 1
+        fi
+    done
+
+    log_green "DNS_SERVERS validated: $dns_servers"
+}
+
+# Validate ALLOWEDIPS format (comma-separated CIDRs)
+validate_allowed_ips() {
+    local allowed_ips="$1"
+
+    log_grey "Validating ALLOWEDIPS: $allowed_ips"
+
+    if [[ -z "$allowed_ips" ]]; then
+        log_red "ALLOWEDIPS cannot be empty"
+        exit 1
+    fi
+
+    # Split by comma and validate each CIDR
+    local cidrs=( ${(s:,:)allowed_ips} )
+    local cidr_pattern='^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$'
+
+    for cidr in "${cidrs[@]}"; do
+        # Trim whitespace
+        cidr="${cidr// /}"
+        if [[ ! "$cidr" =~ $cidr_pattern ]]; then
+            log_red "Invalid ALLOWEDIPS entry: $cidr"
+            log_orange "Expected format: x.x.x.x/y (e.g., 0.0.0.0/0)"
+            exit 1
+        fi
+    done
+
+    log_green "ALLOWEDIPS validated: $allowed_ips"
+}
+
+
+# ------------------------------------------------------------
+# Section 5: Public IP Discovery
+# ------------------------------------------------------------
+# Discover the server's public IP using multiple services with failover.
+
+get_public_ip() {
+    log_grey "Discovering server public IP..."
+
+    # Failover list of IP discovery services
+    local services=(
+        "https://icanhazip.com"
+        "https://api.ipify.org"
+        "https://ifconfig.me/ip"
+        "https://ipinfo.io/ip"
+        "https://checkip.amazonaws.com"
+    )
+
+    local public_ip=""
+
+    for service in "${services[@]}"; do
+        log_grey "  Trying $service..."
+
+        public_ip=$( curl -s --max-time 5 "$service" 2>/dev/null | tr -d '[:space:]' )
+
+        # Validate the response looks like an IP address
+        if [[ "$public_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            log_green "Public IP discovered: $public_ip"
+            echo "$public_ip"
+            return 0
+        fi
+    done
+
+    log_red "Failed to discover public IP from any service"
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# Section 6: WireGuard Key Management
+# ------------------------------------------------------------
+# Generate and manage WireGuard keypairs for server and clients.
+
+# Generate a new keypair and return as "private:public"
+generate_keypair() {
+    local private_key=$( wg genkey )
+    local public_key=$( echo "$private_key" | wg pubkey )
+
+    echo "${private_key}:${public_key}"
+}
+
+# Get or create server keys (persistent in /configs)
+# Sets global variables: SERVER_PRIVATE_KEY, SERVER_PUBLIC_KEY
+get_or_create_server_keys() {
+    local server_private_key_file="/configs/.server_private_key"
+    local server_public_key_file="/configs/.server_public_key"
+
+    if [[ -f "$server_private_key_file" ]] && [[ -f "$server_public_key_file" ]]; then
+        log_grey "Using existing server keys"
+        SERVER_PRIVATE_KEY=$( cat "$server_private_key_file" )
+        SERVER_PUBLIC_KEY=$( cat "$server_public_key_file" )
+    else
+        log_grey "Generating new server keypair..."
+
+        local keypair=$( generate_keypair )
+        SERVER_PRIVATE_KEY="${keypair%:*}"
+        SERVER_PUBLIC_KEY="${keypair#*:}"
+
+        # Save keys for persistence across container restarts
+        echo "$SERVER_PRIVATE_KEY" > "$server_private_key_file"
+        echo "$SERVER_PUBLIC_KEY" > "$server_public_key_file"
+
+        # Secure the private key file
+        chmod 600 "$server_private_key_file"
+
+        log_green "Server keypair generated and saved"
+    fi
+}
+
+
+# ------------------------------------------------------------
+# Section 7: IP Address Management
+# ------------------------------------------------------------
+# Track and allocate IP addresses within the VPN subnet.
+
+# Convert IP address to integer for arithmetic operations
+ip_to_int() {
+    local ip="$1"
+    local octets=( ${(s:.:)ip} )
+    echo $(( octets[1] * 16777216 + octets[2] * 65536 + octets[3] * 256 + octets[4] ))
+}
+
+# Convert integer back to IP address
+int_to_ip() {
+    local int="$1"
+    echo "$(( int / 16777216 % 256 )).$(( int / 65536 % 256 )).$(( int / 256 % 256 )).$(( int % 256 ))"
+}
+
+# Calculate the server IP (first usable address in the subnet)
+# For 10.0.0.0/16 -> 10.0.0.1
+# For 10.0.1.128/25 -> 10.0.1.129
+calculate_server_ip() {
+    local cidr="$1"
+    local network="${cidr%/*}"
+
+    # Server IP is network address + 1
+    local network_int=$( ip_to_int "$network" )
+    local server_int=$(( network_int + 1 ))
+
+    int_to_ip "$server_int"
+}
+
+# Get list of IPs already used by existing configs as a set (associative array for O(1) lookup)
+# Populates the global USED_IPS_SET associative array
+load_used_ips() {
+    typeset -gA USED_IPS_SET
+    USED_IPS_SET=()
+
+    # Parse existing config files to extract their IPs from filenames
+    # Use (N) glob qualifier to return empty list if no matches
+    for config_file in /configs/*.conf(N); do
+        [[ -f "$config_file" ]] || continue
+
+        # Extract IP from filename (e.g., 10.0.0.4.conf -> 10.0.0.4)
+        local filename=$( basename "$config_file" .conf )
+
+        # Validate it looks like an IP and add to set
+        if [[ "$filename" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            USED_IPS_SET[$filename]=1
+        fi
+    done
+}
+
+# Check if an IP is already used (O(1) lookup)
+is_ip_used() {
+    local ip="$1"
+    [[ -n "${USED_IPS_SET[$ip]:-}" ]]
+}
+
+# Mark an IP as used
+mark_ip_used() {
+    local ip="$1"
+    USED_IPS_SET[$ip]=1
+}
+
+# Get count of used IPs
+get_used_ip_count() {
+    echo "${#USED_IPS_SET[@]}"
+}
+
+# IP iterator state (for efficient sequential allocation)
+typeset -g NEXT_IP_INT=0
+typeset -g END_IP_INT=0
+
+# Initialize IP iterator for a subnet
+init_ip_iterator() {
+    local cidr="$1"
+    local network="${cidr%/*}"
+    local prefix="${cidr#*/}"
+
+    local network_int=$( ip_to_int "$network" )
+    local host_bits=$(( 32 - prefix ))
+    local num_hosts=$(( 2 ** host_bits ))
+
+    # Start from network + 2 (skip .0 network, .1 server)
+    NEXT_IP_INT=$(( network_int + 2 ))
+    END_IP_INT=$(( network_int + num_hosts - 2 ))  # Skip broadcast
+}
+
+# Get next available IP using iterator (O(1) amortized)
+get_next_available_ip() {
+    while [[ "$NEXT_IP_INT" -le "$END_IP_INT" ]]; do
+        local ip=$( int_to_ip "$NEXT_IP_INT" )
+        (( NEXT_IP_INT++ ))
+
+        # O(1) lookup using associative array
+        if ! is_ip_used "$ip"; then
+            echo "$ip"
+            return 0
+        fi
+    done
+
+    return 1  # No available IPs
+}
+
+
+# ------------------------------------------------------------
+# Section 8: Config Generation
+# ------------------------------------------------------------
+# Generate WireGuard configuration files for clients and server.
+
+# Generate a client configuration file
+# Also caches the public key for faster server config generation
+generate_client_config() {
+    local client_ip="$1"
+    local client_private_key="$2"
+    local client_public_key="$3"
+    local server_public_key="$4"
+    local server_endpoint="$5"
+    local dns_servers="$6"
+    local allowed_ips="$7"
+
+    local config_file="/configs/${client_ip}.conf"
+    local pubkey_file="/configs/.${client_ip}.pubkey"
+
+    cat > "$config_file" << EOF
+[Interface]
+# Client configuration for ${client_ip}
+PrivateKey = ${client_private_key}
+Address = ${client_ip}/32
+DNS = ${dns_servers}
+
+[Peer]
+# Server connection details
+PublicKey = ${server_public_key}
+AllowedIPs = ${allowed_ips}
+Endpoint = ${server_endpoint}:${WIREGUARD_PORT}
+PersistentKeepalive = 25
+EOF
+
+    chmod 600 "$config_file"
+
+    # Cache the public key for faster server config regeneration
+    echo "$client_public_key" > "$pubkey_file"
+}
+
+# Generate the server configuration with all client peers
+# Uses cached public keys when available for performance
+generate_server_config() {
+    local server_ip="$1"
+    local cidr="$2"
+    local default_interface="$3"
+
+    log_grey "Generating server configuration..."
+
+    # Create /etc/wireguard directory if it doesn't exist
+    mkdir -p /etc/wireguard
+
+    # Build peer sections for all client configs
+    local peer_sections=""
+    local client_count=0
+
+    # Use (N) glob qualifier to handle no matches gracefully
+    for config_file in /configs/*.conf(N); do
+        [[ -f "$config_file" ]] || continue
+
+        local client_ip=$( basename "$config_file" .conf )
+
+        # Skip if not a valid IP pattern
+        [[ "$client_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+
+        local client_public_key=""
+        local pubkey_file="/configs/.${client_ip}.pubkey"
+
+        # Try to use cached public key first (much faster)
+        if [[ -f "$pubkey_file" ]]; then
+            client_public_key=$( cat "$pubkey_file" )
+        else
+            # Fall back to deriving from private key (slower)
+            local client_private_key=$( grep "^PrivateKey" "$config_file" | cut -d'=' -f2 | tr -d ' ' )
+            client_public_key=$( echo "$client_private_key" | wg pubkey )
+            # Cache it for next time
+            echo "$client_public_key" > "$pubkey_file"
+        fi
+
+        peer_sections+="
+[Peer]
+# Client ${client_ip}
+PublicKey = ${client_public_key}
+AllowedIPs = ${client_ip}/32
+"
+        (( client_count++ ))
+
+        # Progress logging for large config sets
+        if [[ $(( client_count % 5000 )) -eq 0 ]]; then
+            log_grey "  Processed $client_count client configs..."
+        fi
+    done
+
+    # Write server config with NAT rules for routing client traffic
+    cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+# WireGuard Firehose Server
+PrivateKey = ${SERVER_PRIVATE_KEY}
+Address = ${server_ip}/${cidr#*/}
+ListenPort = ${WIREGUARD_PORT}
+
+# NAT rules: masquerade client traffic through the detected interface (${default_interface})
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${default_interface} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${default_interface} -j MASQUERADE
+${peer_sections}
+EOF
+
+    chmod 600 /etc/wireguard/wg0.conf
+    log_green "Server configuration generated with $client_count peers"
+}
+
+# Generate missing client configs up to MAX_CONFIGS
+generate_missing_configs() {
+    local cidr="$1"
+    local max_configs="$2"
+    local server_endpoint="$3"
+
+    log_grey "Checking for existing configurations..."
+
+    # Load used IPs into associative array for O(1) lookup
+    load_used_ips
+    local existing_count=$( get_used_ip_count )
+
+    log_grey "Found $existing_count existing configurations"
+
+    # Calculate how many to generate
+    local to_generate=$(( max_configs - existing_count ))
+
+    if [[ "$to_generate" -le 0 ]]; then
+        log_green "All $max_configs configurations already exist"
+        return 0
+    fi
+
+    log_grey "Generating $to_generate new configurations..."
+
+    # Initialize IP iterator for efficient allocation
+    init_ip_iterator "$cidr"
+
+    local generated=0
+
+    while [[ "$generated" -lt "$to_generate" ]]; do
+        # Get next available IP (O(1) amortized with iterator)
+        local client_ip=$( get_next_available_ip )
+
+        if [[ -z "$client_ip" ]]; then
+            log_orange "No more IPs available in subnet"
+            break
+        fi
+
+        # Generate keypair for this client
+        local keypair=$( generate_keypair )
+        local client_private_key="${keypair%:*}"
+        local client_public_key="${keypair#*:}"
+
+        # Generate the config file (now includes public key for caching)
+        generate_client_config \
+            "$client_ip" \
+            "$client_private_key" \
+            "$client_public_key" \
+            "$SERVER_PUBLIC_KEY" \
+            "$server_endpoint" \
+            "$DNS_SERVERS" \
+            "$ALLOWEDIPS"
+
+        # Mark IP as used
+        mark_ip_used "$client_ip"
+
+        (( generated++ ))
+
+        # Progress logging every 1000 configs
+        if [[ $(( generated % 1000 )) -eq 0 ]]; then
+            log_grey "  Generated $generated / $to_generate configurations..."
+        fi
+    done
+
+    log_green "Generated $generated new configurations"
+}
+
+
+# ------------------------------------------------------------
+# Section 9: WireGuard Server Management
+# ------------------------------------------------------------
+# Start and manage the WireGuard interface with graceful shutdown.
+
+# Graceful shutdown handler
+shutdown_wireguard() {
+    log_grey "Received shutdown signal, stopping WireGuard..."
+
+    if wg show wg0 &>/dev/null; then
+        wg-quick down wg0
+        log_green "WireGuard stopped gracefully"
+    fi
+
+    exit 0
+}
+
+# Set up signal handlers for graceful shutdown
+setup_signal_handlers() {
+    trap shutdown_wireguard SIGTERM SIGINT SIGHUP
+}
+
+start_wireguard() {
+    log_grey "Starting WireGuard server..."
+
+    # Bring up the WireGuard interface
+    if wg-quick up wg0; then
+        log_green "WireGuard server started successfully"
+
+        # Display summary interface info (suppress peer list for large configs)
+        local peer_count=$( wg show wg0 peers | wc -l )
+        log_grey "Interface: wg0"
+        log_grey "Public key: $( wg show wg0 public-key )"
+        log_grey "Listen port: $( wg show wg0 listen-port )"
+        log_grey "Connected peers: $peer_count"
+    else
+        log_red "Failed to start WireGuard server"
+        exit 1
+    fi
+}
+
+# Keep container running while handling signals
+wait_forever() {
+    log_grey "Container running. Press Ctrl+C or send SIGTERM to stop."
+
+    # Wait indefinitely while allowing signal handling
+    while true; do
+        sleep 86400 &
+        wait $! || true
+    done
+}
+
+
+# ------------------------------------------------------------
+# Section 10: Main Execution
+# ------------------------------------------------------------
+# Orchestrate the complete setup process.
+
+main() {
+    echo ""
+    echo "============================================================"
+    echo "  WireGuard Firehose - Auto-provisioning Server"
+    echo "============================================================"
+    echo ""
+
+    # Set up signal handlers for graceful shutdown
+    setup_signal_handlers
+
+    # Step 1: Check dependencies and capabilities
+    check_dependencies
+    check_capabilities
+
+    # Step 2: Set system configuration
+    set_sysctl_values
+
+    # Step 3: Validate all configuration
+    validate_cidr "$INTERNAL_SUBNET_CIDR"
+    validate_max_configs "$MAX_CONFIGS" "$INTERNAL_SUBNET_CIDR"
+    validate_dns_servers "$DNS_SERVERS"
+    validate_allowed_ips "$ALLOWEDIPS"
+
+    # Step 4: Detect default network interface for NAT
+    local default_interface=$( get_default_interface )
+    log_grey "Using network interface: $default_interface"
+
+    # Step 5: Discover public IP for client configs
+    local public_ip=$( get_public_ip )
+
+    # Step 6: Initialize server keys (persistent across restarts)
+    get_or_create_server_keys
+
+    # Step 7: Calculate server IP (first usable address in subnet)
+    local server_ip=$( calculate_server_ip "$INTERNAL_SUBNET_CIDR" )
+    log_grey "Server internal IP: $server_ip"
+
+    # Step 8: Ensure /configs directory exists
+    mkdir -p /configs
+
+    # Step 9: Generate missing client configs
+    generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip"
+
+    # Step 10: Generate server config with all client peers
+    generate_server_config "$server_ip" "$INTERNAL_SUBNET_CIDR" "$default_interface"
+
+    # Step 11: Start WireGuard server
+    start_wireguard
+
+    log_green "WireGuard Firehose is ready!"
+    log_grey "Client configs available in /configs"
+
+    # Keep container running with proper signal handling
+    wait_forever
+}
+
+main "$@"
