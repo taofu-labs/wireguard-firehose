@@ -565,16 +565,11 @@ generate_server_config() {
     # Create /etc/wireguard directory if it doesn't exist
     mkdir -p /etc/wireguard
 
-    # Count total configs first for progress reporting
-    local config_files=( /configs/*.conf(N) )
-    local total_configs=${#config_files[@]}
-
     # Build peer sections for all client configs
     local peer_sections=""
     local client_count=0
-    local last_logged_percent=0
 
-    for config_file in "${config_files[@]}"; do
+    for config_file in /configs/*.conf(N); do
         [[ -f "$config_file" ]] || continue
 
         local filename=$( basename "$config_file" .conf )
@@ -612,16 +607,6 @@ PublicKey = ${client_public_key}
 AllowedIPs = ${client_ip}/32
 "
         (( ++client_count ))
-
-        # Progress logging every 10%
-        if [[ "$total_configs" -gt 0 ]]; then
-            local current_percent=$(( client_count * 100 / total_configs ))
-            if [[ $(( current_percent / 10 )) -gt $(( last_logged_percent / 10 )) ]]; then
-                local display_percent=$(( (current_percent / 10) * 10 ))
-                log_grey "Progress ${display_percent}% ($client_count/$total_configs)"
-                last_logged_percent="$current_percent"
-            fi
-        fi
     done
 
     # Write server config with NAT rules for routing client traffic
