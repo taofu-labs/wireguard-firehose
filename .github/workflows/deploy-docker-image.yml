@@ -1,0 +1,62 @@
+# ============================================================
+# WireGuard Firehose - Docker Hub Publish Workflow
+# ============================================================
+
+name: Build and Publish Docker Image
+
+on:
+    push:
+        tags:
+        - '*'
+
+env:
+    REGISTRY: docker.io
+    IMAGE_NAME: taofuprotocol/wireguard-firehose
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Determine tags based on branch
+        id: tags
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git branch -r --contains ${{ github.sha }} | grep -q 'origin/development'; then
+              echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}-development,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-development" >> $GITHUB_OUTPUT
+          else
+              echo "tags=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,ref=taofuprotocol/wireguard-firehose:buildcache
+          cache-to: type=gha,mode=max,ref=taofuprotocol/wireguard-firehose:buildcache
