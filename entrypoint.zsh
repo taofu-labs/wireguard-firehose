@@ -27,12 +27,12 @@ readonly COLOR_RESET=$'\033[0m'
 
 # Log informational message (grey) - nice to know, can be ignored
 log_grey() {
-    print "${COLOR_GREY}[INFO] $1${COLOR_RESET}"
+    print "${COLOR_GREY}[INFO] $1${COLOR_RESET}" >&2
 }
 
 # Log success message (green) - explicit success
 log_green() {
-    print "${COLOR_GREEN}[SUCCESS] $1${COLOR_RESET}"
+    print "${COLOR_GREEN}[SUCCESS] $1${COLOR_RESET}" >&2
 }
 
 # Log error message (red) - explicit failure (to stderr)
@@ -42,7 +42,7 @@ log_red() {
 
 # Log warning/suggestion message (orange)
 log_orange() {
-    print "${COLOR_ORANGE}[WARNING] $1${COLOR_RESET}"
+    print "${COLOR_ORANGE}[WARNING] $1${COLOR_RESET}" >&2
 }
 
 
@@ -534,7 +534,7 @@ generate_server_config() {
 PublicKey = ${client_public_key}
 AllowedIPs = ${client_ip}/32
 "
-        (( client_count++ ))
+        (( ++client_count ))
 
         # Progress logging for large config sets
         if [[ $(( client_count % 5000 )) -eq 0 ]]; then
@@ -626,7 +626,7 @@ generate_missing_configs() {
         # Mark IP as used
         mark_ip_used "$client_ip"
 
-        (( generated++ ))
+        (( ++generated ))
 
         # Progress logging every 1000 configs
         if [[ $(( generated % 1000 )) -eq 0 ]]; then
