@@ -159,6 +159,7 @@ download_files() {
     # Create data directories
     mkdir -p configs
     mkdir -p keys
+    mkdir -p regen_requests
 
     # Create default .env file if it doesn't exist (preserve existing on update)
     if [[ ! -f .env ]]; then
@@ -224,6 +225,7 @@ print_complete() {
         echo "  - .env configuration"
         echo "  - configs/ directory"
         echo "  - keys/ directory"
+        echo "  - regen_requests/ directory"
         echo ""
         echo "If the container was running, it has been restarted."
         echo "Otherwise, start it with:"

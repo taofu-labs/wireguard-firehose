@@ -21,7 +21,8 @@ RUN apk add --no-cache \
     iptables \
     curl \
     netcat-openbsd \
-    bash
+    bash \
+    inotify-tools
 
 # Copy entrypoint script and make executable
 COPY entrypoint.zsh /entrypoint.zsh
@@ -30,6 +31,7 @@ RUN chmod +x /entrypoint.zsh
 # Volumes for persistent data
 VOLUME /configs
 VOLUME /keys
+VOLUME /regen_requests
 
 # Environment variable defaults
 ENV WIREGUARD_PORT=51820 \

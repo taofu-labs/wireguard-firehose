@@ -115,6 +115,29 @@ Generate QR codes for client configs to easily import on mobile devices:
 
 Requires `qrencode` on the host (installed automatically by setup.sh).
 
+## Key Regeneration
+
+Regenerate keys for a specific client to invalidate existing connections and allow new clients to use the config. This works without restarting the container.
+
+```bash
+# Regenerate by IP address
+touch regen_requests/10.0.0.50
+
+# Regenerate by peer name (increment mode)
+touch regen_requests/peer5
+```
+
+The container watches the `regen_requests/` folder. When a file is created:
+1. New keypair is generated
+2. Client config file is updated with new private key
+3. WireGuard interface is hot-updated (old peer removed, new peer added)
+4. Request file is deleted on success
+
+Use cases:
+- Rotate compromised credentials
+- Disconnect a client and reassign the config
+- Periodic key rotation
+
 ## Directory Structure
 
 ```
@@ -127,6 +150,7 @@ wireguard-firehose/
 │   ├── server_public_key
 │   ├── 10.0.0.2.pubkey
 │   └── ...
+├── regen_requests/       # Drop files here to trigger key regeneration
 ├── .env                  # Configuration
 ├── docker-compose.yml
 └── qr.sh                 # QR code generator

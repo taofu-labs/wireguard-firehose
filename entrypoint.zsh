@@ -55,7 +55,7 @@ log_orange() {
 check_dependencies() {
     log_grey "Checking required dependencies..."
 
-    local dependencies=( "wg" "wg-quick" "ip" "iptables" "curl" "nc" )
+    local dependencies=( "wg" "wg-quick" "ip" "iptables" "curl" "nc" "inotifywait" )
     local missing=()
 
     for dep in "${dependencies[@]}"; do
@@ -590,14 +590,26 @@ generate_server_config() {
         local pubkey_file="/keys/${client_ip}.pubkey"
 
         # Try to use cached public key first (much faster)
+        # Validate it's a proper 44-char base64 key
         if [[ -f "$pubkey_file" ]]; then
-            client_public_key=$( cat "$pubkey_file" )
-        else
-            # Fall back to deriving from private key (slower)
-            local client_private_key=$( grep "^PrivateKey" "$config_file" | cut -d'=' -f2 | tr -d ' ' )
-            client_public_key=$( echo "$client_private_key" | wg pubkey )
-            # Cache it for next time
-            echo "$client_public_key" > "$pubkey_file"
+            client_public_key=$( tr -d '[:space:]' < "$pubkey_file" )
+        fi
+
+        # Validate key format (WireGuard keys are 44 chars base64)
+        if [[ ${#client_public_key} -ne 44 ]]; then
+            # Fall back to deriving from private key
+            local client_private_key=$( grep "^PrivateKey" "$config_file" | sed 's/.*=\s*//' | tr -d '[:space:]' )
+            if [[ ${#client_private_key} -eq 44 ]]; then
+                client_public_key=$( echo "$client_private_key" | wg pubkey 2>/dev/null ) || {
+                    log_orange "Skipping $client_ip: could not derive public key"
+                    continue
+                }
+                # Cache it for next time
+                echo "$client_public_key" > "$pubkey_file"
+            else
+                log_orange "Skipping $client_ip: invalid private key in config"
+                continue
+            fi
         fi
 
         peer_sections+="
@@ -758,7 +770,138 @@ wait_forever() {
 
 
 # ------------------------------------------------------------
-# Section 10: Main Execution
+# Section 10: Key Regeneration Watcher
+# ------------------------------------------------------------
+# Watch for regeneration requests and hot-swap client keys.
+
+# Regenerate keys for a specific client config
+# Usage: regenerate_client_keys <identifier>
+# Where identifier is either an IP (10.0.0.5) or peer name (peer5)
+regenerate_client_keys() {
+    local identifier="$1"
+    local client_ip=""
+    local config_file=""
+
+    # Determine if identifier is an IP or peer name
+    if [[ "$identifier" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        client_ip="$identifier"
+        # Try IP-based filename first, then search for peer file
+        if [[ -f "/configs/${client_ip}.conf" ]]; then
+            config_file="/configs/${client_ip}.conf"
+        else
+            # Search for config with this IP in Address field
+            config_file=$( grep -l "Address = ${client_ip}/32" /configs/*.conf 2>/dev/null | head -1 )
+        fi
+    elif [[ "$identifier" =~ ^peer[0-9]+$ ]]; then
+        config_file="/configs/${identifier}.conf"
+        if [[ -f "$config_file" ]]; then
+            # Extract IP from config
+            client_ip=$( grep -oP '^Address\s*=\s*\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$config_file" 2>/dev/null )
+        fi
+    else
+        log_red "Invalid identifier format: $identifier (expected IP or peerN)"
+        return 1
+    fi
+
+    # Validate we found the config
+    if [[ -z "$config_file" || ! -f "$config_file" ]]; then
+        log_red "Config file not found for: $identifier"
+        return 1
+    fi
+
+    if [[ -z "$client_ip" ]]; then
+        log_red "Could not determine IP for: $identifier"
+        return 1
+    fi
+
+    local pubkey_file="/keys/${client_ip}.pubkey"
+
+    # Get old public key (needed to remove from WireGuard)
+    local old_pubkey=""
+    if [[ -f "$pubkey_file" ]]; then
+        old_pubkey=$( tr -d '[:space:]' < "$pubkey_file" )
+    fi
+
+    # Validate or derive old public key
+    if [[ ${#old_pubkey} -ne 44 ]]; then
+        # Derive from config's private key
+        local old_privkey=$( grep "^PrivateKey" "$config_file" | sed 's/.*=\s*//' | tr -d '[:space:]' )
+        if [[ ${#old_privkey} -eq 44 ]]; then
+            old_pubkey=$( echo "$old_privkey" | wg pubkey 2>/dev/null ) || old_pubkey=""
+        fi
+    fi
+
+    log_grey "Regenerating keys for $identifier ($client_ip)..."
+
+    # Generate new keypair
+    local keypair=$( generate_keypair )
+    local new_private_key="${keypair%:*}"
+    local new_public_key="${keypair#*:}"
+
+    # Update config file with new private key
+    sed -i "s|^PrivateKey = .*|PrivateKey = ${new_private_key}|" "$config_file"
+
+    # Update cached public key
+    echo "$new_public_key" > "$pubkey_file"
+
+    # Hot-swap peer in WireGuard interface
+    if [[ -n "$old_pubkey" ]]; then
+        wg set wg0 peer "$old_pubkey" remove 2>/dev/null || true
+    fi
+    wg set wg0 peer "$new_public_key" allowed-ips "${client_ip}/32"
+
+    log_green "Keys regenerated for $identifier ($client_ip)"
+    return 0
+}
+
+# Process all pending regeneration requests
+process_regen_requests() {
+    for request_file in /regen_requests/*(N); do
+        [[ -f "$request_file" ]] || continue
+
+        local identifier=$( basename "$request_file" )
+
+        # Skip hidden files and temp files
+        [[ "$identifier" == .* ]] && continue
+
+        if regenerate_client_keys "$identifier"; then
+            rm -f "$request_file"
+        else
+            log_orange "Failed to process regen request: $identifier (file kept for retry)"
+        fi
+    done
+}
+
+# Start the inotifywait watcher as a background process
+start_regen_watcher() {
+    log_grey "Starting key regeneration watcher..."
+
+    # Process any existing requests first
+    process_regen_requests
+
+    # Start watching for new requests in background
+    (
+        inotifywait -m -e create -e moved_to --format '%f' /regen_requests 2>/dev/null | while read identifier; do
+            # Skip hidden files and temp files
+            [[ "$identifier" == .* ]] && continue
+
+            # Small delay to ensure file is fully written
+            sleep 0.1
+
+            if [[ -f "/regen_requests/${identifier}" ]]; then
+                if regenerate_client_keys "$identifier"; then
+                    rm -f "/regen_requests/${identifier}"
+                fi
+            fi
+        done
+    ) &
+
+    log_green "Key regeneration watcher started"
+}
+
+
+# ------------------------------------------------------------
+# Section 11: Main Execution
 # ------------------------------------------------------------
 # Orchestrate the complete setup process.
 
@@ -806,6 +949,7 @@ main() {
     # Step 9: Ensure directories exist
     mkdir -p /configs
     mkdir -p /keys
+    mkdir -p /regen_requests
 
     # Step 10: Generate missing client configs
     generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip" "$FILENAME_FORMAT"
@@ -816,8 +960,12 @@ main() {
     # Step 12: Start WireGuard server
     start_wireguard
 
+    # Step 13: Start key regeneration watcher
+    start_regen_watcher
+
     log_green "WireGuard Firehose is ready!"
     log_grey "Client configs available in /configs"
+    log_grey "To regenerate keys: touch regen_requests/<ip-or-peer-name>"
 
     # Keep container running with proper signal handling
     wait_forever
