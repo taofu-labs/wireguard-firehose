@@ -34,10 +34,10 @@ services:
       - FILENAME_FORMAT=${FILENAME_FORMAT:-ip}
       - FORCE_CONFIG_REGENERATION=${FORCE_CONFIG_REGENERATION:-false}
 
-    # Persistent volumes for configs and cached public keys
+    # Persistent volumes for configs and keys
     volumes:
       - ./configs:/configs
-      - ./pubkeys:/pubkeys
+      - ./keys:/keys
 
     # WireGuard UDP port mapping
     ports:

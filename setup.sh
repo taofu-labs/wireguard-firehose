@@ -158,7 +158,7 @@ download_files() {
 
     # Create data directories
     mkdir -p configs
-    mkdir -p pubkeys
+    mkdir -p keys
 
     # Create default .env file if it doesn't exist (preserve existing on update)
     if [[ ! -f .env ]]; then
@@ -223,7 +223,7 @@ print_complete() {
         echo "Preserved:"
         echo "  - .env configuration"
         echo "  - configs/ directory"
-        echo "  - pubkeys/ directory"
+        echo "  - keys/ directory"
         echo ""
         echo "If the container was running, it has been restarted."
         echo "Otherwise, start it with:"

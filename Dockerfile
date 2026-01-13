@@ -29,7 +29,7 @@ RUN chmod +x /entrypoint.zsh
 
 # Volumes for persistent data
 VOLUME /configs
-VOLUME /pubkeys
+VOLUME /keys
 
 # Environment variable defaults
 ENV WIREGUARD_PORT=51820 \

@@ -122,7 +122,9 @@ wireguard-firehose/
 ├── configs/              # Client .conf files
 │   ├── peer1.conf        # (or 10.0.0.2.conf in ip mode)
 │   └── ...
-├── pubkeys/              # Cached public keys (for faster restarts)
+├── keys/                 # Server keys and cached client public keys
+│   ├── server_private_key
+│   ├── server_public_key
 │   ├── 10.0.0.2.pubkey
 │   └── ...
 ├── .env                  # Configuration
@@ -133,8 +135,7 @@ wireguard-firehose/
 ## Persistence
 
 - Client configurations are stored in `/configs` (mounted as `./configs`)
-- Public key cache is stored in `/pubkeys` (mounted as `./pubkeys`)
-- Server keys are persisted in `/configs/.server_private_key` and `/configs/.server_public_key`
+- Server keys and public key cache are stored in `/keys` (mounted as `./keys`)
 - Existing configurations are preserved on restart (unless `FORCE_CONFIG_REGENERATION=true`)
 
 ## Requirements

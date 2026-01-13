@@ -283,8 +283,8 @@ handle_force_regeneration() {
     if [[ "${FORCE_CONFIG_REGENERATION:-false}" == "true" ]]; then
         log_orange "FORCE_CONFIG_REGENERATION is enabled - removing all existing configs"
         rm -rf /configs/*
-        rm -rf /pubkeys/*
-        log_green "Existing configs and pubkeys removed"
+        rm -rf /keys/*
+        log_green "Existing configs and keys removed"
     fi
 }
 
@@ -339,11 +339,11 @@ generate_keypair() {
     echo "${private_key}:${public_key}"
 }
 
-# Get or create server keys (persistent in /configs)
+# Get or create server keys (persistent in /keys)
 # Sets global variables: SERVER_PRIVATE_KEY, SERVER_PUBLIC_KEY
 get_or_create_server_keys() {
-    local server_private_key_file="/configs/.server_private_key"
-    local server_public_key_file="/configs/.server_public_key"
+    local server_private_key_file="/keys/server_private_key"
+    local server_public_key_file="/keys/server_public_key"
 
     if [[ -f "$server_private_key_file" ]] && [[ -f "$server_public_key_file" ]]; then
         log_grey "Using existing server keys"
@@ -530,7 +530,7 @@ generate_client_config() {
     fi
 
     local config_file="/configs/${config_name}.conf"
-    local pubkey_file="/pubkeys/${client_ip}.pubkey"
+    local pubkey_file="/keys/${client_ip}.pubkey"
 
     cat > "$config_file" << EOF
 [Interface]
@@ -587,7 +587,7 @@ generate_server_config() {
         [[ -n "$client_ip" ]] || continue
 
         local client_public_key=""
-        local pubkey_file="/pubkeys/${client_ip}.pubkey"
+        local pubkey_file="/keys/${client_ip}.pubkey"
 
         # Try to use cached public key first (much faster)
         if [[ -f "$pubkey_file" ]]; then
@@ -805,7 +805,7 @@ main() {
 
     # Step 9: Ensure directories exist
     mkdir -p /configs
-    mkdir -p /pubkeys
+    mkdir -p /keys
 
     # Step 10: Generate missing client configs
     generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip" "$FILENAME_FORMAT"
