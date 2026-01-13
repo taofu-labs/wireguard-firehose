@@ -31,10 +31,13 @@ services:
       - MAX_CONFIGS=${MAX_CONFIGS:-50000}
       - ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0}
       - DNS_SERVERS=${DNS_SERVERS:-1.1.1.1,8.8.8.8,8.8.4.4}
+      - FILENAME_FORMAT=${FILENAME_FORMAT:-ip}
+      - FORCE_CONFIG_REGENERATION=${FORCE_CONFIG_REGENERATION:-false}
 
-    # Persistent volume for client configurations
+    # Persistent volumes for configs and cached public keys
     volumes:
       - ./configs:/configs
+      - ./pubkeys:/pubkeys
 
     # WireGuard UDP port mapping
     ports:

@@ -263,6 +263,31 @@ validate_allowed_ips() {
     log_green "ALLOWEDIPS validated: $allowed_ips"
 }
 
+# Validate FILENAME_FORMAT (ip or increment)
+validate_filename_format() {
+    local format="$1"
+
+    log_grey "Validating FILENAME_FORMAT: $format"
+
+    if [[ "$format" != "ip" && "$format" != "increment" ]]; then
+        log_red "Invalid FILENAME_FORMAT: $format"
+        log_orange "Valid values are: ip, increment"
+        exit 1
+    fi
+
+    log_green "FILENAME_FORMAT validated: $format"
+}
+
+# Handle forced config regeneration
+handle_force_regeneration() {
+    if [[ "${FORCE_CONFIG_REGENERATION:-false}" == "true" ]]; then
+        log_orange "FORCE_CONFIG_REGENERATION is enabled - removing all existing configs"
+        rm -rf /configs/*
+        rm -rf /pubkeys/*
+        log_green "Existing configs and pubkeys removed"
+    fi
+}
+
 
 # ------------------------------------------------------------
 # Section 5: Public IP Discovery
@@ -377,23 +402,46 @@ calculate_server_ip() {
 
 # Get list of IPs already used by existing configs as a set (associative array for O(1) lookup)
 # Populates the global USED_IPS_SET associative array
+# Also tracks the highest peer number for increment mode
+typeset -g NEXT_PEER_NUMBER=1
+
 load_used_ips() {
     typeset -gA USED_IPS_SET
     USED_IPS_SET=()
+    NEXT_PEER_NUMBER=1
 
-    # Parse existing config files to extract their IPs from filenames
+    local highest_peer=0
+
+    # Parse existing config files to extract their IPs
     # Use (N) glob qualifier to return empty list if no matches
     for config_file in /configs/*.conf(N); do
         [[ -f "$config_file" ]] || continue
 
-        # Extract IP from filename (e.g., 10.0.0.4.conf -> 10.0.0.4)
         local filename=$( basename "$config_file" .conf )
+        local client_ip=""
 
-        # Validate it looks like an IP and add to set
+        # Try to get IP from filename first (ip format)
         if [[ "$filename" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            USED_IPS_SET[$filename]=1
+            client_ip="$filename"
+        else
+            # Parse IP from Address line in config (increment format)
+            client_ip=$( grep -oP '^Address\s*=\s*\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$config_file" 2>/dev/null || true )
+        fi
+
+        if [[ -n "$client_ip" ]]; then
+            USED_IPS_SET[$client_ip]=1
+        fi
+
+        # Track highest peer number for increment mode
+        if [[ "$filename" =~ ^peer([0-9]+)$ ]]; then
+            local peer_num="${match[1]}"
+            if [[ "$peer_num" -gt "$highest_peer" ]]; then
+                highest_peer="$peer_num"
+            fi
         fi
     done
+
+    NEXT_PEER_NUMBER=$(( highest_peer + 1 ))
 }
 
 # Check if an IP is already used (O(1) lookup)
@@ -454,6 +502,13 @@ get_next_available_ip() {
 # ------------------------------------------------------------
 # Generate WireGuard configuration files for clients and server.
 
+# Get the next peer number and increment counter
+get_next_peer_number() {
+    local num="$NEXT_PEER_NUMBER"
+    (( ++NEXT_PEER_NUMBER ))
+    echo "$num"
+}
+
 # Generate a client configuration file
 # Also caches the public key for faster server config generation
 generate_client_config() {
@@ -464,9 +519,18 @@ generate_client_config() {
     local server_endpoint="$5"
     local dns_servers="$6"
     local allowed_ips="$7"
+    local filename_format="$8"
 
-    local config_file="/configs/${client_ip}.conf"
-    local pubkey_file="/configs/.${client_ip}.pubkey"
+    local config_name
+    if [[ "$filename_format" == "increment" ]]; then
+        local peer_num=$( get_next_peer_number )
+        config_name="peer${peer_num}"
+    else
+        config_name="${client_ip}"
+    fi
+
+    local config_file="/configs/${config_name}.conf"
+    local pubkey_file="/pubkeys/${client_ip}.pubkey"
 
     cat > "$config_file" << EOF
 [Interface]
@@ -485,7 +549,7 @@ EOF
 
     chmod 600 "$config_file"
 
-    # Cache the public key for faster server config regeneration
+    # Cache the public key for faster server config regeneration (always keyed by IP)
     echo "$client_public_key" > "$pubkey_file"
 }
 
@@ -509,13 +573,22 @@ generate_server_config() {
     for config_file in /configs/*.conf(N); do
         [[ -f "$config_file" ]] || continue
 
-        local client_ip=$( basename "$config_file" .conf )
+        local filename=$( basename "$config_file" .conf )
+        local client_ip=""
 
-        # Skip if not a valid IP pattern
-        [[ "$client_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+        # Get IP from filename (ip format) or from config content (increment format)
+        if [[ "$filename" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            client_ip="$filename"
+        else
+            # Parse IP from Address line in config
+            client_ip=$( grep -oP '^Address\s*=\s*\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$config_file" 2>/dev/null || true )
+        fi
+
+        # Skip if we couldn't determine the IP
+        [[ -n "$client_ip" ]] || continue
 
         local client_public_key=""
-        local pubkey_file="/configs/.${client_ip}.pubkey"
+        local pubkey_file="/pubkeys/${client_ip}.pubkey"
 
         # Try to use cached public key first (much faster)
         if [[ -f "$pubkey_file" ]]; then
@@ -565,6 +638,7 @@ generate_missing_configs() {
     local cidr="$1"
     local max_configs="$2"
     local server_endpoint="$3"
+    local filename_format="$4"
 
     log_grey "Checking for existing configurations..."
 
@@ -582,7 +656,7 @@ generate_missing_configs() {
         return 0
     fi
 
-    log_grey "Generating $to_generate new configurations..."
+    log_grey "Generating $to_generate new configurations (format: $filename_format)..."
 
     # Initialize IP iterator for efficient allocation
     init_ip_iterator "$cidr"
@@ -618,7 +692,8 @@ generate_missing_configs() {
             "$SERVER_PUBLIC_KEY" \
             "$server_endpoint" \
             "$DNS_SERVERS" \
-            "$ALLOWEDIPS" || {
+            "$ALLOWEDIPS" \
+            "$filename_format" || {
             log_red "Failed to write config file for $client_ip (possible disk full or permission issue)"
             exit 1
         }
@@ -718,31 +793,36 @@ main() {
     validate_max_configs "$MAX_CONFIGS" "$INTERNAL_SUBNET_CIDR"
     validate_dns_servers "$DNS_SERVERS"
     validate_allowed_ips "$ALLOWEDIPS"
+    validate_filename_format "$FILENAME_FORMAT"
 
-    # Step 4: Detect default network interface for NAT
+    # Step 4: Handle forced regeneration (before anything else touches configs)
+    handle_force_regeneration
+
+    # Step 5: Detect default network interface for NAT
     local default_interface=$( get_default_interface )
     log_grey "Using network interface: $default_interface"
 
-    # Step 5: Discover public IP for client configs
+    # Step 6: Discover public IP for client configs
     local public_ip=$( get_public_ip )
 
-    # Step 6: Initialize server keys (persistent across restarts)
+    # Step 7: Initialize server keys (persistent across restarts)
     get_or_create_server_keys
 
-    # Step 7: Calculate server IP (first usable address in subnet)
+    # Step 8: Calculate server IP (first usable address in subnet)
     local server_ip=$( calculate_server_ip "$INTERNAL_SUBNET_CIDR" )
     log_grey "Server internal IP: $server_ip"
 
-    # Step 8: Ensure /configs directory exists
+    # Step 9: Ensure directories exist
     mkdir -p /configs
+    mkdir -p /pubkeys
 
-    # Step 9: Generate missing client configs
-    generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip"
+    # Step 10: Generate missing client configs
+    generate_missing_configs "$INTERNAL_SUBNET_CIDR" "$MAX_CONFIGS" "$public_ip" "$FILENAME_FORMAT"
 
-    # Step 10: Generate server config with all client peers
+    # Step 11: Generate server config with all client peers
     generate_server_config "$server_ip" "$INTERNAL_SUBNET_CIDR" "$default_interface"
 
-    # Step 11: Start WireGuard server
+    # Step 12: Start WireGuard server
     start_wireguard
 
     log_green "WireGuard Firehose is ready!"

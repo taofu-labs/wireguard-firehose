@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/taofu-labs/wireguard-firehose/main/
 ```
 
 This will:
-- Install Docker and WireGuard
+- Install Docker, WireGuard, and qrencode
 - Configure kernel parameters and firewall
 - Download the docker-compose.yml to `~/wireguard-firehose`
 - Create a default `.env` configuration file
@@ -47,8 +47,8 @@ curl -fsSL https://get.docker.com | sudo sh
 # Add your user to the docker group (logout/login required)
 sudo usermod -aG docker $USER
 
-# Install WireGuard kernel module (usually pre-installed on Ubuntu 24)
-sudo apt install -y wireguard-tools
+# Install WireGuard and qrencode
+sudo apt install -y wireguard-tools qrencode
 
 # Verify the WireGuard module is available
 sudo modprobe wireguard
@@ -81,21 +81,61 @@ sudo ufw allow 51820/udp
 | `MAX_CONFIGS` | `50000` | Maximum client configs to generate |
 | `ALLOWEDIPS` | `0.0.0.0/0` | Client routing (full tunnel by default) |
 | `DNS_SERVERS` | `1.1.1.1,8.8.8.8,8.8.4.4` | DNS servers for clients |
+| `FILENAME_FORMAT` | `ip` | Config naming: `ip` (10.0.0.2.conf) or `increment` (peer1.conf) |
+| `FORCE_CONFIG_REGENERATION` | `false` | Set to `true` to delete all configs and regenerate on startup |
 
 ## Client Configuration Files
 
-Client configs are named by their internal IP address:
+Client configs are named based on `FILENAME_FORMAT`:
+
+**ip mode (default):**
 - `10.0.0.2.conf`
 - `10.0.0.3.conf`
 - etc.
 
+**increment mode:**
+- `peer1.conf`
+- `peer2.conf`
+- etc.
+
 The server uses `.1` of the subnet (e.g., `10.0.0.1`).
+
+## Scripts
+
+### QR Code Generator
+
+Generate QR codes for client configs to easily import on mobile devices:
+
+```bash
+./qr.sh              # Show QR for first, middle, and last config
+./qr.sh peer5        # Show QR for specific config
+./qr.sh 10.0.0.5     # Show QR for specific IP-named config
+./qr.sh peer1 peer2  # Show QR for multiple configs
+```
+
+Requires `qrencode` on the host (installed automatically by setup.sh).
+
+## Directory Structure
+
+```
+wireguard-firehose/
+├── configs/              # Client .conf files
+│   ├── peer1.conf        # (or 10.0.0.2.conf in ip mode)
+│   └── ...
+├── pubkeys/              # Cached public keys (for faster restarts)
+│   ├── 10.0.0.2.pubkey
+│   └── ...
+├── .env                  # Configuration
+├── docker-compose.yml
+└── qr.sh                 # QR code generator
+```
 
 ## Persistence
 
 - Client configurations are stored in `/configs` (mounted as `./configs`)
+- Public key cache is stored in `/pubkeys` (mounted as `./pubkeys`)
 - Server keys are persisted in `/configs/.server_private_key` and `/configs/.server_public_key`
-- Existing configurations are preserved on restart
+- Existing configurations are preserved on restart (unless `FORCE_CONFIG_REGENERATION=true`)
 
 ## Requirements
 

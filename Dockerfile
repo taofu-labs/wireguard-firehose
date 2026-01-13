@@ -27,15 +27,18 @@ RUN apk add --no-cache \
 COPY entrypoint.zsh /entrypoint.zsh
 RUN chmod +x /entrypoint.zsh
 
-# Volume for persistent client configurations
+# Volumes for persistent data
 VOLUME /configs
+VOLUME /pubkeys
 
 # Environment variable defaults
 ENV WIREGUARD_PORT=51820 \
     INTERNAL_SUBNET_CIDR=10.0.0.0/16 \
     MAX_CONFIGS=50000 \
     ALLOWEDIPS=0.0.0.0/0 \
-    DNS_SERVERS=1.1.1.1,8.8.8.8,8.8.4.4
+    DNS_SERVERS=1.1.1.1,8.8.8.8,8.8.4.4 \
+    FILENAME_FORMAT=ip \
+    FORCE_CONFIG_REGENERATION=false
 
 # Health check: verify WireGuard is listening on the configured port
 # Uses nc to check UDP port as specified in the specification

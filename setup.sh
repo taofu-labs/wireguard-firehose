@@ -99,9 +99,9 @@ install_wireguard() {
         return 0
     fi
 
-    log_info "Installing WireGuard tools..."
+    log_info "Installing WireGuard tools and qrencode..."
     apt-get update -qq
-    apt-get install -y -qq wireguard-tools > /dev/null
+    apt-get install -y -qq wireguard-tools qrencode > /dev/null
 
     # Load the module
     modprobe wireguard 2>/dev/null || true
@@ -156,8 +156,9 @@ download_files() {
     rm -f docker-compose.yml
     curl -fsSL "${REPO_RAW_URL}/docker-compose.yml" -o docker-compose.yml
 
-    # Create configs directory
+    # Create data directories
     mkdir -p configs
+    mkdir -p pubkeys
 
     # Create default .env file if it doesn't exist (preserve existing on update)
     if [[ ! -f .env ]]; then
@@ -222,6 +223,7 @@ print_complete() {
         echo "Preserved:"
         echo "  - .env configuration"
         echo "  - configs/ directory"
+        echo "  - pubkeys/ directory"
         echo ""
         echo "If the container was running, it has been restarted."
         echo "Otherwise, start it with:"
