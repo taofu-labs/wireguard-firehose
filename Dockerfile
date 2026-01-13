@@ -14,6 +14,7 @@ FROM alpine:latest
 # - curl: for fetching public IP from external services
 # - netcat-openbsd: for health check (nc command)
 # - bash: dependency of wg-quick
+# - grep: GNU grep for -P (Perl regex) support (BusyBox grep lacks this)
 RUN apk add --no-cache \
     wireguard-tools \
     zsh \
@@ -22,7 +23,8 @@ RUN apk add --no-cache \
     curl \
     netcat-openbsd \
     bash \
-    inotify-tools
+    inotify-tools \
+    grep
 
 # Copy entrypoint script and make executable
 COPY entrypoint.zsh /entrypoint.zsh

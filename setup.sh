@@ -195,9 +195,21 @@ pull_image() {
 restart_container() {
     cd "${INSTALL_DIR}"
 
+    # If docker group was just changed, user needs to re-login first
+    if [[ "$DOCKER_GROUP_CHANGED" -eq 1 ]]; then
+        log_warn "Docker group membership changed - cannot restart container"
+        log_info "Please log out and back in, then restart manually with: docker compose up -d"
+        return 0
+    fi
+
     if docker compose ps --quiet 2>/dev/null | grep -q .; then
         log_info "Restarting container with updated image..."
-        sudo -u "${ACTUAL_USER}" docker compose up -d --pull always
+        # Use sg to run with docker group if available, fall back to sudo -u
+        if command -v sg &>/dev/null && groups "$ACTUAL_USER" | grep -q '\bdocker\b'; then
+            sudo -u "${ACTUAL_USER}" sg docker -c "cd \"${INSTALL_DIR}\" && docker compose up -d --pull always"
+        else
+            sudo -u "${ACTUAL_USER}" docker compose up -d --pull always
+        fi
         log_info "Container restarted successfully"
     else
         log_info "Container not running - skipping restart"
