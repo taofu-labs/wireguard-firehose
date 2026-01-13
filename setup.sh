@@ -156,6 +156,11 @@ download_files() {
     rm -f docker-compose.yml
     curl -fsSL "${REPO_RAW_URL}/docker-compose.yml" -o docker-compose.yml
 
+    log_info "Downloading qr.sh..."
+    rm -f qr.sh
+    curl -fsSL "${REPO_RAW_URL}/qr.sh" -o qr.sh
+    chmod +x qr.sh
+
     # Create data directories
     mkdir -p configs
     mkdir -p keys
@@ -233,6 +238,7 @@ print_complete() {
     if [[ "$IS_UPDATE" -eq 1 ]]; then
         echo "Updated components:"
         echo "  - docker-compose.yml"
+        echo "  - qr.sh"
         echo "  - Docker image (latest)"
         echo ""
         echo "Preserved:"
