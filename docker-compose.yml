@@ -20,6 +20,10 @@ services:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
 
+    # TUN device for WireGuard interface
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
     # Environment variables with defaults
     environment:
       - WIREGUARD_PORT=${WIREGUARD_PORT:-51820}

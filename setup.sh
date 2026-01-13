@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# WireGuard Firehose - Quick Setup Script
+# WireGuard Firehose - Setup & Update Script
 # ============================================================
 # Usage: curl -fsSL https://raw.githubusercontent.com/taofu-labs/wireguard-firehose/main/setup.sh | bash
 # ============================================================
@@ -10,6 +10,9 @@ set -euo pipefail
 # Configuration
 REPO_RAW_URL="https://raw.githubusercontent.com/taofu-labs/wireguard-firehose/main"
 WIREGUARD_PORT="${WIREGUARD_PORT:-51820}"
+
+# Mode detection (set after INSTALL_DIR is defined)
+IS_UPDATE=0
 
 # Detect actual user when run with sudo
 if [[ -n "${SUDO_USER:-}" ]]; then
@@ -134,9 +137,18 @@ configure_firewall() {
     fi
 }
 
+# Detect if this is an update
+detect_mode() {
+    if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
+        IS_UPDATE=1
+        log_info "Existing installation detected - running in update mode"
+    else
+        log_info "Fresh installation"
+    fi
+}
+
 # Download required files
 download_files() {
-    log_info "Creating installation directory: ${INSTALL_DIR}"
     mkdir -p "${INSTALL_DIR}"
     cd "${INSTALL_DIR}"
 
@@ -146,7 +158,7 @@ download_files() {
     # Create configs directory
     mkdir -p configs
 
-    # Create default .env file if it doesn't exist
+    # Create default .env file if it doesn't exist (preserve existing on update)
     if [[ ! -f .env ]]; then
         log_info "Creating default .env file..."
         cat > .env << EOF
@@ -157,6 +169,8 @@ MAX_CONFIGS=50000
 ALLOWEDIPS=0.0.0.0/0
 DNS_SERVERS=1.1.1.1,8.8.8.8,8.8.4.4
 EOF
+    else
+        log_info "Preserving existing .env file"
     fi
 
     # Set ownership to actual user (not root) for rootless docker
@@ -172,17 +186,48 @@ pull_image() {
     log_info "Docker image pulled successfully"
 }
 
+# Restart container if running (for updates)
+restart_container() {
+    cd "${INSTALL_DIR}"
+
+    if docker compose ps --quiet 2>/dev/null | grep -q .; then
+        log_info "Restarting container with updated image..."
+        sudo -u "${ACTUAL_USER}" docker compose up -d --pull always
+        log_info "Container restarted successfully"
+    else
+        log_info "Container not running - skipping restart"
+    fi
+}
+
 # Print completion message
 print_complete() {
     echo ""
     echo "============================================================"
-    echo -e "${GREEN}WireGuard Firehose Setup Complete!${NC}"
+    if [[ "$IS_UPDATE" -eq 1 ]]; then
+        echo -e "${GREEN}WireGuard Firehose Update Complete!${NC}"
+    else
+        echo -e "${GREEN}WireGuard Firehose Setup Complete!${NC}"
+    fi
     echo "============================================================"
     echo ""
     echo "Installation directory: ${INSTALL_DIR}"
     echo ""
 
-    if [[ "$DOCKER_GROUP_CHANGED" -eq 1 ]]; then
+    if [[ "$IS_UPDATE" -eq 1 ]]; then
+        echo "Updated components:"
+        echo "  - docker-compose.yml"
+        echo "  - Docker image (latest)"
+        echo ""
+        echo "Preserved:"
+        echo "  - .env configuration"
+        echo "  - configs/ directory"
+        echo ""
+        echo "If the container was running, it has been restarted."
+        echo "Otherwise, start it with:"
+        echo ""
+        echo "  cd ${INSTALL_DIR}"
+        echo "  docker compose up -d"
+    elif [[ "$DOCKER_GROUP_CHANGED" -eq 1 ]]; then
         echo -e "${YELLOW}IMPORTANT: You were added to the docker group.${NC}"
         echo "Log out and back in, then start the server:"
         echo ""
@@ -208,7 +253,9 @@ print_complete() {
     echo "Client configs will be available in:"
     echo "  ${INSTALL_DIR}/configs/"
     echo ""
-    echo "To customize, edit ${INSTALL_DIR}/.env before starting."
+    if [[ "$IS_UPDATE" -eq 0 ]]; then
+        echo "To customize, edit ${INSTALL_DIR}/.env before starting."
+    fi
     echo "============================================================"
 }
 
@@ -216,18 +263,24 @@ print_complete() {
 main() {
     echo ""
     echo "============================================================"
-    echo "  WireGuard Firehose - Quick Setup"
+    echo "  WireGuard Firehose - Setup & Update"
     echo "============================================================"
     echo ""
 
     check_root
     detect_os
+    detect_mode
     install_docker
     install_wireguard
     configure_sysctl
     configure_firewall
     download_files
     pull_image
+
+    if [[ "$IS_UPDATE" -eq 1 ]]; then
+        restart_container
+    fi
+
     print_complete
 }
 
