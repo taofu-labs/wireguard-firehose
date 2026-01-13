@@ -153,6 +153,7 @@ download_files() {
     cd "${INSTALL_DIR}"
 
     log_info "Downloading docker-compose.yml..."
+    rm -f docker-compose.yml
     curl -fsSL "${REPO_RAW_URL}/docker-compose.yml" -o docker-compose.yml
 
     # Create configs directory
