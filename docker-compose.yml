@@ -22,6 +22,7 @@ services:
     sysctls:
       - net.ipv4.ip_forward=1
       - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.forwarding=1
 
     # TUN device for WireGuard interface
     devices:
@@ -30,6 +31,7 @@ services:
     # Environment variables with defaults
     environment:
       - WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+      - CLIENT_LISTEN_PORT=${CLIENT_LISTEN_PORT:-}
       - INTERNAL_SUBNET_CIDR=${INTERNAL_SUBNET_CIDR:-10.0.0.0/16}
       - MAX_CONFIGS=${MAX_CONFIGS:-50000}
       - ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0}
@@ -37,12 +39,18 @@ services:
       - FILENAME_FORMAT=${FILENAME_FORMAT:-ip}
       - FORCE_CONFIG_REGENERATION=${FORCE_CONFIG_REGENERATION:-false}
       - ISOLATE_CLIENTS=${ISOLATE_CLIENTS:-true}
+      - PERSISTENT_KEEPALIVE=${PERSISTENT_KEEPALIVE:-}
+      - IP_MODE=${IP_MODE:-ipv4}
+      - INTERNAL_SUBNET_CIDR_V6=${INTERNAL_SUBNET_CIDR_V6:-fd00::/64}
+      - ALLOWEDIPS_V6=${ALLOWEDIPS_V6:-::/0}
+      - DNS_SERVERS_V6=${DNS_SERVERS_V6:-2606:4700:4700::1111,2001:4860:4860::8888}
 
     # Persistent volumes for configs, keys, and regen requests
     volumes:
       - ./configs:/configs
       - ./keys:/keys
       - ./regen_requests:/regen_requests
+      - /lib/modules:/lib/modules:ro
 
     # WireGuard UDP port mapping
     ports:

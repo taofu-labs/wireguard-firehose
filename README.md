@@ -62,6 +62,9 @@ Enable IP forwarding (persists across reboots):
 echo 'net.ipv4.ip_forward=1' | sudo tee /etc/sysctl.d/99-wireguard.conf
 echo 'net.ipv4.conf.all.src_valid_mark=1' | sudo tee -a /etc/sysctl.d/99-wireguard.conf
 
+# Enable IPv6 forwarding (required for ipv6 or dual mode)
+echo 'net.ipv6.conf.all.forwarding=1' | sudo tee -a /etc/sysctl.d/99-wireguard.conf
+
 # Apply immediately
 sudo sysctl -p /etc/sysctl.d/99-wireguard.conf
 ```
@@ -77,13 +80,48 @@ sudo ufw allow 51820/udp
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WIREGUARD_PORT` | `51820` | WireGuard UDP listen port |
-| `INTERNAL_SUBNET_CIDR` | `10.0.0.0/16` | VPN internal subnet |
+| `IP_MODE` | `ipv4` | Protocol mode: `ipv4`, `ipv6`, or `dual` |
+| `INTERNAL_SUBNET_CIDR` | `10.0.0.0/16` | IPv4 VPN internal subnet |
+| `INTERNAL_SUBNET_CIDR_V6` | `fd00::/64` | IPv6 VPN internal subnet (ULA) |
 | `MAX_CONFIGS` | `50000` | Maximum client configs to generate |
-| `ALLOWEDIPS` | `0.0.0.0/0` | Client routing (full tunnel by default) |
-| `DNS_SERVERS` | `1.1.1.1,8.8.8.8,8.8.4.4` | DNS servers for clients |
+| `ALLOWEDIPS` | `0.0.0.0/0` | IPv4 client routing (full tunnel by default) |
+| `ALLOWEDIPS_V6` | `::/0` | IPv6 client routing (full tunnel by default) |
+| `DNS_SERVERS` | `1.1.1.1,8.8.8.8,8.8.4.4` | IPv4 DNS servers for clients |
+| `DNS_SERVERS_V6` | `2606:4700:4700::1111,2001:4860:4860::8888` | IPv6 DNS servers for clients |
 | `FILENAME_FORMAT` | `ip` | Config naming: `ip` (10.0.0.2.conf) or `increment` (peer1.conf) |
 | `FORCE_CONFIG_REGENERATION` | `false` | Set to `true` to delete all configs and regenerate on startup |
 | `ISOLATE_CLIENTS` | `true` | Prevent clients from communicating with each other |
+
+### IP Modes
+
+WireGuard Firehose supports three IP modes:
+
+**IPv4 Only (default):**
+```bash
+IP_MODE=ipv4 docker compose up -d
+```
+- Uses IPv4 addresses only
+- Backward compatible with existing deployments
+- Client configs get `Address = 10.0.0.x/32`
+
+**IPv6 Only:**
+```bash
+IP_MODE=ipv6 docker compose up -d
+```
+- Uses IPv6 addresses only
+- Requires public IPv6 connectivity
+- Client configs get `Address = fd00::x/128`
+- Uses `ip6tables` for firewall rules
+
+**Dual-Stack:**
+```bash
+IP_MODE=dual docker compose up -d
+```
+- Uses both IPv4 and IPv6 addresses
+- Clients can connect over either protocol
+- Client configs get `Address = 10.0.0.x/32, fd00::x/128`
+- Uses both `iptables` and `ip6tables` for firewall rules
+- DNS and AllowedIPs include both IPv4 and IPv6
 
 ### Client Isolation
 
@@ -96,16 +134,18 @@ Set `ISOLATE_CLIENTS=false` to allow client-to-client communication (e.g., for L
 Client configs are named based on `FILENAME_FORMAT`:
 
 **ip mode (default):**
-- `10.0.0.2.conf`
-- `10.0.0.3.conf`
-- etc.
+- IPv4: `10.0.0.2.conf`, `10.0.0.3.conf`, etc.
+- IPv6: `fd00--2.conf`, `fd00--3.conf`, etc. (colons replaced with dashes)
+- Dual: Uses IPv4 address for filename (e.g., `10.0.0.2.conf`)
 
 **increment mode:**
 - `peer1.conf`
 - `peer2.conf`
 - etc.
 
-The server uses `.1` of the subnet (e.g., `10.0.0.1`).
+The server uses the first usable address in each subnet:
+- IPv4: `10.0.0.1`
+- IPv6: `fd00::1`
 
 ## Scripts
 
@@ -127,8 +167,11 @@ Requires `qrencode` on the host (installed automatically by setup.sh).
 Regenerate keys for a specific client to invalidate existing connections and allow new clients to use the config. This works without restarting the container.
 
 ```bash
-# Regenerate by IP address
+# Regenerate by IPv4 address
 touch regen_requests/10.0.0.50
+
+# Regenerate by IPv6 address (sanitized - colons replaced with dashes)
+touch regen_requests/fd00--50
 
 # Regenerate by peer name (increment mode)
 touch regen_requests/peer5
@@ -150,12 +193,13 @@ Use cases:
 ```
 wireguard-firehose/
 ├── configs/              # Client .conf files
-│   ├── peer1.conf        # (or 10.0.0.2.conf in ip mode)
+│   ├── peer1.conf        # (or 10.0.0.2.conf / fd00--2.conf in ip mode)
 │   └── ...
 ├── keys/                 # Server keys and cached client public keys
 │   ├── server_private_key
 │   ├── server_public_key
-│   ├── 10.0.0.2.pubkey
+│   ├── 10.0.0.2.pubkey   # IPv4 keyed
+│   ├── fd00--2.pubkey    # IPv6 keyed (sanitized)
 │   └── ...
 ├── regen_requests/       # Drop files here to trigger key regeneration
 ├── .env                  # Configuration
