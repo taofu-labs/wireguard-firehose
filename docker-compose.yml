@@ -30,19 +30,33 @@ services:
 
     # Environment variables with defaults
     environment:
+      # UDP port for WireGuard (must match host firewall)
       - WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+      # Fixed client listen port (optional, leave empty for random)
       - CLIENT_LISTEN_PORT=${CLIENT_LISTEN_PORT:-}
+      # IPv4 VPN subnet (server gets .1)
       - INTERNAL_SUBNET_CIDR=${INTERNAL_SUBNET_CIDR:-10.0.0.0/16}
+      # Max client configs to generate on startup
       - MAX_CONFIGS=${MAX_CONFIGS:-50000}
+      # IPv4 routes pushed to clients (0.0.0.0/0 = full tunnel)
       - ALLOWEDIPS=${ALLOWEDIPS:-0.0.0.0/0}
+      # DNS servers for clients (comma-separated)
       - DNS_SERVERS=${DNS_SERVERS:-1.1.1.1,8.8.8.8,8.8.4.4}
+      # Config filenames: "ip" (10.0.0.2.conf) or "increment" (peer1.conf)
       - FILENAME_FORMAT=${FILENAME_FORMAT:-ip}
+      # Delete all configs and regenerate on startup
       - FORCE_CONFIG_REGENERATION=${FORCE_CONFIG_REGENERATION:-false}
+      # Prevent client-to-client communication
       - ISOLATE_CLIENTS=${ISOLATE_CLIENTS:-true}
+      # Keepalive interval in seconds (optional, for NAT traversal)
       - PERSISTENT_KEEPALIVE=${PERSISTENT_KEEPALIVE:-}
+      # Protocol mode: ipv4, ipv6, or dual
       - IP_MODE=${IP_MODE:-ipv4}
+      # IPv6 VPN subnet (server gets ::1)
       - INTERNAL_SUBNET_CIDR_V6=${INTERNAL_SUBNET_CIDR_V6:-fd00::/64}
+      # IPv6 routes pushed to clients
       - ALLOWEDIPS_V6=${ALLOWEDIPS_V6:-::/0}
+      # IPv6 DNS servers (Cloudflare, Google)
       - DNS_SERVERS_V6=${DNS_SERVERS_V6:-2606:4700:4700::1111,2001:4860:4860::8888}
 
     # Persistent volumes for configs, keys, and regen requests
